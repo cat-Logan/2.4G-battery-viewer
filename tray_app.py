@@ -39,6 +39,7 @@ from typing import Optional
 import hid_win as hw
 import battery as bt
 import darkrim_proto as drp
+import eweadn_proto as ewp
 import mchose_proto as mcp
 import win_icon
 import tray_common as tc
@@ -168,7 +169,9 @@ def detect_tray_icons() -> list[tuple[int, str, str, bool]]:
     icons = []
     if 0x41E4 in vids or not vids:
         icons.append((1, "kbd", "MCHOSE 键盘", False))
-    if 0x373B in vids:
+    if 0x089D in vids:
+        icons.append((2, "mouse", "EWEADN S9 鼠标", True))
+    elif 0x373B in vids:
         icons.append((2, "mouse", "ATK 鼠标", True))
     if not icons:
         icons.append((1, "kbd", "MCHOSE 键盘", False))
@@ -195,7 +198,12 @@ def read_keyboard() -> tuple[Optional[int], str]:
 
 
 def read_mouse() -> tuple[Optional[int], str]:
-    """无线鼠标：089D 接收器的私有协议还没解出来，先照原样试 ATK 方案。"""
+    """无线鼠标：优先 EWEADN S9 私有协议（089D:062F / FF01，33 字节 0x30）。"""
+    if ewp.find_interface() is not None:
+        try:
+            return ewp.read_battery_only()
+        except Exception as e:
+            return None, f"读取失败：{e}"
     iface = (_find_iface(0x089D, 0xFF00) or _find_iface(0x089D, 0xFF01)
              or _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02))
     if iface is None:

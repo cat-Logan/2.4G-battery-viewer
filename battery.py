@@ -23,6 +23,7 @@ from typing import Callable, Optional
 
 import hid_win as hw
 import darkrim_proto as drp
+import eweadn_proto as ewp
 import mchose_proto as mcp
 from hid_win import HidDevice, HidError, HidInterface, HidP_Feature, HidP_Input
 
@@ -420,6 +421,25 @@ def strategy_mchose_g87(iface: HidInterface) -> Optional[BatteryResult]:
 
 
 # --------------------------------------------------------------------------
+# 策略 B3：EWEADN（前行者）S9 无线鼠标 2.4G 接收器 —— 私有协议 0x30
+# --------------------------------------------------------------------------
+def strategy_eweadn_s9(iface: HidInterface) -> Optional[BatteryResult]:
+    if iface.vid != ewp.VID or iface.usage_page != ewp.USAGE_PAGE:
+        return None
+    info = ewp.read_battery()
+    if not info.ok:
+        return BatteryResult(ok=False, source="EWEADN S9 私有协议（0x30）",
+                             detail=info.detail)
+    return BatteryResult(
+        ok=True, level=info.level, raw_level=info.level,
+        status="charging" if info.charging else "discharging",
+        source="EWEADN S9 私有协议（0x30）",
+        detail=info.detail,
+        raw=info.raw,
+    )
+
+
+# --------------------------------------------------------------------------
 # 策略 C：罗技 HID++ 2.0
 # --------------------------------------------------------------------------
 HIDPP_DEVICE_INDICES = [0xFF, 1, 2, 3, 4, 5, 6]
@@ -712,6 +732,7 @@ def read_battery(iface: HidInterface, listen_seconds: float = 3.0,
         ("标准 HID 电量字段", lambda: strategy_standard_battery_usage(iface)),
         ("DARKRIM 私有协议", lambda: strategy_darkrim(iface)),
         ("MCHOSE G87 私有协议", lambda: strategy_mchose_g87(iface)),
+        ("EWEADN S9 私有协议", lambda: strategy_eweadn_s9(iface)),
         ("厂商协议", lambda: strategy_vendor_protocol(iface)),
         ("罗技 HID++", lambda: strategy_logitech_hidpp(iface)),
     ]

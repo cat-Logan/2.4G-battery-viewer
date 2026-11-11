@@ -22,6 +22,7 @@ from typing import Optional
 import hid_win as hw
 import battery as bt
 import darkrim_proto as drp
+import eweadn_proto as ewp
 import mchose_proto as mcp
 import tray_common as tc
 import win_link
@@ -139,18 +140,36 @@ def read_mchose() -> Reading:
 
 
 def read_lltech() -> Reading:
-    """Wireless-Receiver（llTECH，VID 0x089D）—— 无线鼠标。
+    """EWEADN S9（前行者，无线 089D:062F）—— 私有协议 0x30。
 
-    目前只跑通用策略：厂商协议表 + 标准 HID 电量字段。
-    这台接收器的私有协议还没摸出来，读不到时会给出明确的排查提示。
+    33 字节输出报告（[32]=sum(buf[5..31]) & 0xFF）：
+        发 00 30 00 00 ... 00 00
+        收 00 30 00 01 0b 4d 31 35 36 01 19 95 aa 00 45 01 ...
+           [5..8]="M156"  [13]=充电标志  [14]=电量(0x45=69%)  [15]=连接状态
     """
-    r = Reading("无线鼠标", "Wireless-Receiver")
-    iface = (_find(0x089D, 0xFF00) or _find(0x089D, 0xFF01)
-             or _find(0x089D, 0xFF02))
+    r = Reading("无线鼠标", "EWEADN S9")
+    iface = ewp.find_interface()
+    if iface is None:
+        iface = (_find(0x089D, 0xFF00) or _find(0x089D, 0xFF01)
+                 or _find(0x089D, 0xFF02))
     if iface is None:
         r.error = "没找到接收器（请把 2.4G 接收器插上）"
         return r
     r.subtitle = f"{iface.vid_pid} · {iface.product or '2.4G 接收器'}"
+    if ewp.find_interface() is not None:
+        try:
+            info = ewp.read_battery()
+        except Exception as e:
+            r.error = f"读取出错：{e}"
+            return r
+        if info.ok:
+            r.level = info.level
+            r.status = "充电中" if info.charging else "放电中"
+            r.detail = "EWEADN S9 私有协议（0x30）"
+            r.extra = info.detail
+        else:
+            r.error = info.detail or "读取失败（动一下鼠标唤醒后重试）"
+        return r
     try:
         res = (bt.strategy_vendor_protocol(iface)
                or bt.strategy_standard_battery_usage(iface))
