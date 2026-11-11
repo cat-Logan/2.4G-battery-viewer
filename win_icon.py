@@ -37,15 +37,20 @@ def render_rgba(text: str, size: int, color: tuple[int, int, int],
                 plate: bool = False, plate_color=(28, 30, 34, 235)) -> bytes:
     """把文字渲染成 size×size 的 RGBA 像素（返回 size*size*4 字节，行优先）。"""
     n = len(text)
-    # 选一个能放下的最大缩放倍数
     gap = 1
-    scale = 1
-    while True:
-        w = n * GLYPH_W * (scale + 1) + (n - 1) * gap
-        h = GLYPH_H * (scale + 1)
-        if w > size - 2 or h > size - 2:
-            break
-        scale += 1
+
+    def fit(count: int) -> int:
+        """count 个字符放得下的最大缩放倍数。"""
+        scale = 1
+        while True:
+            w = count * GLYPH_W * (scale + 1) + (count - 1) * gap
+            h = GLYPH_H * (scale + 1)
+            if w > size - 2 or h > size - 2:
+                return scale
+            scale += 1
+
+    # 按「两位数」定字号，个位数就不会被放得比两位数还大（个位数照样居中显示）
+    scale = min(fit(n), fit(2))
 
     gw, gh = GLYPH_W * scale, GLYPH_H * scale
     total_w = n * gw + (n - 1) * gap
