@@ -189,21 +189,45 @@ def _find_iface(vid: int, usage_page: int, output_len: int = 0):
     return None
 
 
+# 插上充电线后，这两只设备都会把电量报成满电（实测鼠标 69% 一插就 100%），
+# 所以充电中只沿用上一次「放电时」的读数，绝不把虚高值显示出来。
+_LAST_GOOD: dict[str, int] = {}
+
+
+def _settle_charging(key: str, level: Optional[int], charging: bool,
+                     err: str) -> tuple[Optional[int], str]:
+    if charging:
+        prev = _LAST_GOOD.get(key)
+        if prev is None:
+            # 还没见过放电读数：只能显示设备给的值，但要说清它可能是虚高的。
+            return level, "充电中（读数可能虚高）"
+        return prev, f"充电中（显示上次放电读数 {prev}%）"
+    if level is not None:
+        _LAST_GOOD[key] = level
+    return level, err
+
+
 def read_keyboard() -> tuple[Optional[int], str]:
     """MCHOSE G87 2.4G 键盘：厂商私有协议 0x13/0x4A（20 字节输出报告）。"""
     try:
-        return mcp.read_battery_only()
+        r = mcp.read_battery()
     except Exception as e:
         return None, f"读取失败：{e}"
+    if not r.ok:
+        return None, r.detail or "无回复（按一下键盘）"
+    return _settle_charging("kbd", r.level, r.charging, "")
 
 
 def read_mouse() -> tuple[Optional[int], str]:
     """无线鼠标：优先 EWEADN S9 私有协议（089D:062F / FF01，33 字节 0x30）。"""
     if ewp.find_interface() is not None:
         try:
-            return ewp.read_battery_only()
+            r = ewp.read_battery()
         except Exception as e:
             return None, f"读取失败：{e}"
+        if not r.ok:
+            return None, r.detail or "无回复（动一下鼠标）"
+        return _settle_charging("mouse", r.level, r.charging, "")
     iface = (_find_iface(0x089D, 0xFF00) or _find_iface(0x089D, 0xFF01)
              or _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02))
     if iface is None:

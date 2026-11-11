@@ -131,7 +131,8 @@ def read_mchose() -> Reading:
         return r
     if info.ok:
         r.level = info.level
-        r.status = "充电中" if info.charging else "放电中"
+        # 插上充电线后设备会把电量虚报成满电，这里的数字不可信。
+        r.status = "充电中（读数虚高）" if info.charging else "放电中"
         r.detail = "MCHOSE G87 私有协议（0x13/0x4A）"
         r.extra = info.detail
     else:
@@ -164,7 +165,7 @@ def read_lltech() -> Reading:
             return r
         if info.ok:
             r.level = info.level
-            r.status = "充电中" if info.charging else "放电中"
+            r.status = "充电中（读数虚高）" if info.charging else "放电中"
             r.detail = "EWEADN S9 私有协议（0x30）"
             r.extra = info.detail
         else:
