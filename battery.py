@@ -23,6 +23,7 @@ from typing import Callable, Optional
 
 import hid_win as hw
 import darkrim_proto as drp
+import mchose_proto as mcp
 from hid_win import HidDevice, HidError, HidInterface, HidP_Feature, HidP_Input
 
 USER_PROTOCOL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -152,6 +153,17 @@ BUILTIN_PROTOCOLS: list[ProtocolSpec] = [
         payload=[0x15, 0x00, 0x00, 0x01], length=32,
         level_offset=9, wait_ms=90, scale=1, mode="feature",
         notes="请求 0x15 读取电量",
+    ),
+    # MCHOSE 2.4G 无线键盘（Compx 方案，接收器 VID 0x41E4 / usage page 0xFF04）
+    # Feature Report 0x06 是只读的：不需要先发请求，直接 GetFeature 即可。
+    # 实测返回 7 字节负载：00 02 64 64 64 a9 9d
+    ProtocolSpec(
+        name="MCHOSE 2.4G 键盘（Compx）",
+        vid=0x41E4, usage_page=0xFF04, report_id=0x06,
+        payload=[], length=8, level_offset=3, wait_ms=120, scale=1,
+        level_max=100, mode="feature_ro", retries=2,
+        notes="7 字节负载 [0]=状态 [1]=模式(0x02=2.4G) [2]=电量 "
+              "[3..4]=保留 [5..6]=校验；只读，无需先写请求",
     ),
 ]
 
@@ -301,6 +313,12 @@ def _read_report_after_request(dev: HidDevice, spec: ProtocolSpec,
     last = b""
     for _ in range(max(1, spec.retries)):
         dev.drain()
+        if kind == "feature_ro":
+            # 纯只读的 Feature Report：不发任何请求，直接 GetFeature
+            last = dev.get_feature_report(spec.report_id, spec.length)
+            if not spec.expect or _matches(last, spec.expect):
+                return last
+            continue
         if kind == "feature":
             dev.set_feature_report(bytes(body))
             time.sleep(spec.wait_ms / 1000.0)
@@ -380,6 +398,25 @@ def strategy_vendor_protocol(iface: HidInterface) -> Optional[BatteryResult]:
                                  detail=f"收发失败：{e}（可能是权限被占用，"
                                         f"请关闭厂商驱动软件后重试）")
     return last
+
+
+# --------------------------------------------------------------------------
+# 策略 B2：MCHOSE（迈从）G87 键盘 2.4G 接收器 —— 私有协议 0x13/0x4A
+# --------------------------------------------------------------------------
+def strategy_mchose_g87(iface: HidInterface) -> Optional[BatteryResult]:
+    if iface.vid != mcp.VID or iface.usage_page != mcp.USAGE_PAGE:
+        return None
+    info = mcp.read_battery()
+    if not info.ok:
+        return BatteryResult(ok=False, source="MCHOSE G87 私有协议（0x13/0x4A）",
+                             detail=info.detail)
+    status = "charging" if info.charging else "discharging"
+    return BatteryResult(
+        ok=True, level=info.level, raw_level=info.level, status=status,
+        source="MCHOSE G87 私有协议（0x13/0x4A）",
+        detail=info.detail,
+        raw=info.raw,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -674,6 +711,7 @@ def read_battery(iface: HidInterface, listen_seconds: float = 3.0,
     steps = [
         ("标准 HID 电量字段", lambda: strategy_standard_battery_usage(iface)),
         ("DARKRIM 私有协议", lambda: strategy_darkrim(iface)),
+        ("MCHOSE G87 私有协议", lambda: strategy_mchose_g87(iface)),
         ("厂商协议", lambda: strategy_vendor_protocol(iface)),
         ("罗技 HID++", lambda: strategy_logitech_hidpp(iface)),
     ]

@@ -22,6 +22,7 @@ from typing import Optional
 import hid_win as hw
 import battery as bt
 import darkrim_proto as drp
+import mchose_proto as mcp
 import tray_common as tc
 import win_link
 from hid_win import HidInterface
@@ -108,8 +109,89 @@ def read_darkrim() -> Reading:
     return r
 
 
+def read_mchose() -> Reading:
+    """MCHOSE G87 2.4G 无线键盘 —— 厂商私有协议 0x13/0x4A。
+
+    20 字节输出报告（末字节 = 前 19 字节之和）：
+        发 13 4a 01 00 00 ... 00 5e
+        收 13 4a 01 00 02 3c 01 00 ... 00 9d
+           [5]=电量(0x3c=60%)  [6] 高4位=充电中 低4位=满电
+    """
+    r = Reading("MCHOSE 键盘", "无接收器")
+    iface = mcp.find_interface()
+    if iface is None:
+        r.error = "没找到接收器（请把 MCHOSE 的 2.4G 接收器插上）"
+        return r
+    r.subtitle = f"{iface.vid_pid} · {iface.product or '2.4G 接收器'}"
+    try:
+        info = mcp.read_battery()
+    except Exception as e:
+        r.error = f"读取出错：{e}"
+        return r
+    if info.ok:
+        r.level = info.level
+        r.status = "充电中" if info.charging else "放电中"
+        r.detail = "MCHOSE G87 私有协议（0x13/0x4A）"
+        r.extra = info.detail
+    else:
+        r.error = info.detail or "读取失败"
+    return r
+
+
+def read_lltech() -> Reading:
+    """Wireless-Receiver（llTECH，VID 0x089D）—— 无线鼠标。
+
+    目前只跑通用策略：厂商协议表 + 标准 HID 电量字段。
+    这台接收器的私有协议还没摸出来，读不到时会给出明确的排查提示。
+    """
+    r = Reading("无线鼠标", "Wireless-Receiver")
+    iface = (_find(0x089D, 0xFF00) or _find(0x089D, 0xFF01)
+             or _find(0x089D, 0xFF02))
+    if iface is None:
+        r.error = "没找到接收器（请把 2.4G 接收器插上）"
+        return r
+    r.subtitle = f"{iface.vid_pid} · {iface.product or '2.4G 接收器'}"
+    try:
+        res = (bt.strategy_vendor_protocol(iface)
+               or bt.strategy_standard_battery_usage(iface))
+    except Exception as e:
+        r.error = f"读取出错：{e}"
+        return r
+    if res is None:
+        r.error = ("这台接收器没有公开电量接口，协议尚未支持"
+                   "（可用 python my_devices.py --probe 抓报文）")
+        return r
+    if res.ok:
+        r.level = res.level
+        r.status = res.status_text
+        r.detail = res.source
+    else:
+        r.error = res.detail or "读取失败"
+    return r
+
+
 def read_all() -> list[Reading]:
-    return [read_atk(), read_darkrim()]
+    """自动发现：插着什么就读什么；一台都没插时回落到原来那两张卡。"""
+    try:
+        present = {d.vid for d in hw.enumerate_hid()}
+    except Exception:
+        present = set()
+
+    cards: list[Reading] = []
+    if 0x089D in present:
+        cards.append(read_lltech())
+    if 0x41E4 in present:
+        cards.append(read_mchose())
+    if 0x373B in present:
+        cards.append(read_atk())
+    if 0x3654 in present:
+        cards.append(read_darkrim())
+    if not cards:
+        cards = [read_atk(), read_darkrim()]
+    while len(cards) < 2:
+        cards.append(Reading("空闲", "没有检测到设备",
+                             error="插上 2.4G 接收器后点「立即刷新」"))
+    return cards[:2]
 
 
 # ==========================================================================
@@ -181,6 +263,7 @@ class DeviceCard:
         self.lab_extra.pack(anchor="w", pady=(4, 0))
 
     def update(self, r: Reading) -> None:
+        self.lab_title.configure(text=r.title)
         self.lab_sub.configure(text=r.subtitle)
         if r.ok:
             self.lab_level.configure(text=f"{r.level}%",
@@ -270,9 +353,9 @@ def build_ui():
     body.columnconfigure(1, weight=1, uniform="card")
     body.rowconfigure(0, weight=1)
 
-    card_atk = DeviceCard(body, "ATK 鼠标")
+    card_atk = DeviceCard(body, "设备 1")
     card_atk.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    card_dr = DeviceCard(body, "DARKRIM 耳机")
+    card_dr = DeviceCard(body, "设备 2")
     card_dr.frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
     foot = ttk.Label(root, text="正在读取…", style="Muted.TLabel", padding=(18, 4))
@@ -492,9 +575,57 @@ def build_ui():
     return root
 
 
+def cli_probe(seconds: float = 10.0) -> None:
+    """被动监听厂商接口，把收到的原始报文打出来（逆向新设备用）。"""
+    from collections import Counter
+
+    ifaces = [d for d in hw.enumerate_hid()
+              if d.usage_page >= 0xFF00
+              and (d.input_len or d.feature_len)]
+    if not ifaces:
+        print("没找到厂商自定义接口")
+        return
+    for iface in ifaces:
+        print(f"== {iface.vid_pid}  page=0x{iface.usage_page:04X}  "
+              f"in={iface.input_len} out={iface.output_len} "
+              f"feat={iface.feature_len}  {iface.product or ''}")
+        if iface.feature_len:
+            try:
+                with hw.HidDevice(iface.path, write=False) as dev:
+                    for rid in (0x06, 0x00):
+                        try:
+                            rep = dev.get_feature_report(rid, iface.feature_len)
+                        except Exception:
+                            continue
+                        if rep:
+                            print(f"   feature 0x{rid:02X}: {rep.hex(' ')}")
+            except Exception as e:
+                print("   feature 读取失败：", e)
+        if not iface.input_len:
+            continue
+        seen = Counter()
+        try:
+            with hw.HidDevice(iface.path, write=False) as dev:
+                dev.drain()
+                end = time.monotonic() + seconds
+                while time.monotonic() < end:
+                    rep = dev.read_input(timeout_ms=300)
+                    if not rep:
+                        continue
+                    h = rep.hex(" ")
+                    seen[h] += 1
+                    if seen[h] <= 3:
+                        print(f"   {h}")
+        except Exception as e:
+            print("   监听失败：", e)
+        print(f"   ---- 共 {sum(seen.values())} 条，{len(seen)} 种不同报文 ----")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="我的设备电量")
     parser.add_argument("--once", action="store_true", help="命令行读一次就退出")
+    parser.add_argument("--probe", nargs="?", const=10.0, type=float,
+                        metavar="秒", help="被动监听厂商接口打印原始报文（默认 10 秒）")
     parser.add_argument("--install-links", action="store_true",
                         help="在桌面重建软连接（项目文件夹 + 启动脚本）")
     parser.add_argument("--autostart", choices=["on", "off", "status"],
@@ -526,6 +657,10 @@ def main() -> None:
             ok = tc.set_autostart(args.autostart == "on")
             print("已" + ("加入" if args.autostart == "on" else "取消") + "开机自启",
                   "" if ok else "（失败）")
+        return
+
+    if args.probe is not None:
+        cli_probe(args.probe)
         return
 
     if args.once:

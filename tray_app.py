@@ -39,6 +39,7 @@ from typing import Optional
 import hid_win as hw
 import battery as bt
 import darkrim_proto as drp
+import mchose_proto as mcp
 import win_icon
 import tray_common as tc
 
@@ -154,11 +155,24 @@ KERNEL32.CreateMutexW.restype = ctypes.c_void_p
 KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
                                   wintypes.LPCWSTR]
 
-TRAY_ICONS = [
-    # (uID, key, 提示名, 是否带底板)
-    (1, "mouse", "ATK 鼠标", False),
-    (2, "headset", "DARKRIM 耳机", True),
-]
+def detect_tray_icons() -> list[tuple[int, str, str, bool]]:
+    """按实际插着的接收器决定放哪几个图标，不支持的设备干脆不占位。
+
+    返回 (uID, key, 提示名, 是否带底板)。
+    """
+    vids = set()
+    try:
+        vids = {d.vid for d in hw.enumerate_hid()}
+    except Exception:
+        pass
+    icons = []
+    if 0x41E4 in vids or not vids:
+        icons.append((1, "kbd", "MCHOSE 键盘", False))
+    if 0x373B in vids:
+        icons.append((2, "mouse", "ATK 鼠标", True))
+    if not icons:
+        icons.append((1, "kbd", "MCHOSE 键盘", False))
+    return icons
 
 
 # --------------------------------------------------------------------------
@@ -172,8 +186,18 @@ def _find_iface(vid: int, usage_page: int, output_len: int = 0):
     return None
 
 
+def read_keyboard() -> tuple[Optional[int], str]:
+    """MCHOSE G87 2.4G 键盘：厂商私有协议 0x13/0x4A（20 字节输出报告）。"""
+    try:
+        return mcp.read_battery_only()
+    except Exception as e:
+        return None, f"读取失败：{e}"
+
+
 def read_mouse() -> tuple[Optional[int], str]:
-    iface = _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02)
+    """无线鼠标：089D 接收器的私有协议还没解出来，先照原样试 ATK 方案。"""
+    iface = (_find_iface(0x089D, 0xFF00) or _find_iface(0x089D, 0xFF01)
+             or _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02))
     if iface is None:
         return None, "没找到接收器"
     try:
@@ -201,7 +225,8 @@ class TrayApp:
         self.hwnd: Optional[int] = None
         self.wndproc_ref = None
         self.busy = False
-        self.levels = {k: (None, "正在读取…") for _, k, _, _ in TRAY_ICONS}
+        self.icons = detect_tray_icons()
+        self.levels = {k: (None, "正在读取…") for _, k, _, _ in self.icons}
         self.icons_added = False
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
         self.msg_quit = USER32.RegisterWindowMessageW(tc.MSG_QUIT)
@@ -249,7 +274,7 @@ class TrayApp:
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
     def add_icons(self) -> None:
-        for uID, key, title, plate in TRAY_ICONS:
+        for uID, key, title, plate in self.icons:
             ok = self._apply_icon(NIM_ADD, uID, key, title, plate)
             self.log(f"NIM_ADD {title} -> {'ok' if ok else '失败'}")
         self.icons_added = True
@@ -258,11 +283,11 @@ class TrayApp:
         if not self.icons_added:
             self.add_icons()
             return
-        for uID, key, title, plate in TRAY_ICONS:
+        for uID, key, title, plate in self.icons:
             self._apply_icon(NIM_MODIFY, uID, key, title, plate)
 
     def remove_icons(self) -> None:
-        for uID, _, _, _ in TRAY_ICONS:
+        for uID, _, _, _ in self.icons:
             nid = self._nid(uID)
             nid.uFlags = 0
             SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
@@ -303,16 +328,19 @@ class TrayApp:
 
     def _worker(self, hwnd: int) -> None:
         try:
-            self.levels["mouse"] = read_mouse()
-            self.levels["headset"] = read_headset()
+            if "kbd" in self.levels:
+                self.levels["kbd"] = read_keyboard()
+            if "mouse" in self.levels:
+                self.levels["mouse"] = read_mouse()
         except Exception:
             self.log("读取异常:\n" + traceback.format_exc())
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     def on_refresh_done(self) -> None:
         self.busy = False
-        m, h = self.levels["mouse"], self.levels["headset"]
-        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）")
+        k = self.levels.get("kbd", (None, ""))
+        m = self.levels.get("mouse", (None, ""))
+        self.log(f"刷新完成：键盘={k[0]}（{k[1] or 'ok'}） 鼠标={m[0]}（{m[1] or 'ok'}）")
         self.update_icons()
 
     # ---- 打开简洁界面 ---------------------------------------------------
