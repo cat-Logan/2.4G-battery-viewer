@@ -6,7 +6,7 @@
 
     发送 13 4A 01 00 00 00 00 00 ... 00 5E      （20 字节，末字节=前 19 字节之和）
     回包 13 4A 01 00 02 3C 01 00 ... 00 9D      （第 6 字节 = 电量 0x3C = 60%）
-                                                 （第 7 字节高 4 位=充电中，低 4 位=满电）
+                                                 （第 7 字节高 4 位=充电中）
 
 要点（踩过的坑）：必须用**同一个** OVERLAPPED 句柄做 WriteFile + ReadFile；
 用 HidD_SetOutputReport 发、另开读句柄收，写会「成功」但永远收不到回包。
@@ -145,10 +145,13 @@ def parse(raw: bytes) -> G87Battery:
     if percent > 100:
         return G87Battery(ok=False, raw=raw,
                           detail=f"电量字节 0x{percent:02X} 超出 0..100")
+    # 高 4 位 = 充电状态（1=充电中），低 4 位实测**不是**满电标志：
+    # 未充电时读到 0x01、插上充电线后读到 0x10，即低 4 位在未充电时为 1。
+    # 语义未定，故不据此判断满电。
     return G87Battery(
         ok=True, level=percent,
-        charging=bool(status & 0xF0),   # 高 4 位 = chargeStatus
-        full=bool(status & 0x0F),       # 低 4 位 = fullStatus
+        charging=bool(status >> 4),
+        full=False,
         raw=raw,
         detail=f"0x{REPORT_ID:02X}/0x{CMD_BATTERY:02X} 电量@{OFF_BATTERY}={percent}% "
                f"状态@{OFF_STATUS}=0x{status:02X}",
